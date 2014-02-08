@@ -1,0 +1,8 @@
+{application, tweetnacl, [
+    {description, "Conservative, misuse-resistant crypto."},
+    {vsn, "0.0.0"},
+    {modules, [tweetnacl]},
+    {registered, []},
+    {applications, [kernel, stdlib]},
+    {env, []}
+]}.

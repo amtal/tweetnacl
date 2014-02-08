@@ -1,0 +1,5 @@
+ebin/
+priv/
+.eunit/
+*.o
+*.swp
