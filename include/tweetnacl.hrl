@@ -3,3 +3,9 @@
 -define(secretbox_KEYBYTES, 32).
 -define(secretbox_ZEROBYTES, 32).
 -define(secretbox_BOXZEROBYTES, 16).
+-define(box_NONCEBYTES, 24).
+-define(box_KEYBYTES, crypto_box_KEYBYTES).
+-define(box_ZEROBYTES, 32).
+-define(box_BOXZEROBYTES, 16).
+-define(box_PUBLICKEYBYTES, 32).
+-define(box_SECRETKEYBYTES, 32).

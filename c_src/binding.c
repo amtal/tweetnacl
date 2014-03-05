@@ -1,70 +1,110 @@
-#include <string.h> 
-#include <limits.h>
-#include <openssl/rand.h>
-#include "erl_nif.h"
-#include "tweetnacl.h"
+#include <openssl/rand.h> /* current RNG source, ehhh this or urandom? */
+#include <limits.h>     /* un-unit-testable integer bounding in RNG, ehhh :| */
+#include "erl_nif.h"    /* bindings to Erlang */
+#include "tweetnacl.h"  /* lib being wrapped */
 
+/* Simple Erlang C bindings are verbose and repetitive. If all sanitization
+ * and padding is done in Erlang, the C code should become trivial. Since
+ * it's trivial, trivial macros can be used ASSUMING:
+ *
+ * - Arguments are names, numbers, or struct members. NO EXPRESSIONS.
+ * - Resulting eyeball-seconds saving is significant, IE lots of boilerplate
+ *   gone.
+ */
+
+/* All NIFs look like this. */
 #define NIF(name) static ERL_NIF_TERM name(ErlNifEnv* env, \
                                                  int argc, \
                                                  const ERL_NIF_TERM argv[])
+/* Generic binary input, PRE-SANITIZED and padded on Erlang side. */
 #define R_BIN(name, index) \
         ErlNifBinary name; \
-        enif_inspect_binary(env, argv[index], &name);
+        enif_inspect_binary(env, argv[index], &name)
+#define R_BIN2(n0, n1)         R_BIN(n0, 0); R_BIN(n1, 1);
+#define R_BIN3(n0, n1, n2)     R_BIN(n0, 0); R_BIN(n1, 1); R_BIN(n2, 2);
+#define R_BIN4(n0, n1, n2, n3) R_BIN(n0, 0); R_BIN(n1, 1); R_BIN(n2, 2); \
+                                       R_BIN(n3, 3); 
+/* Generic happy-case binary output. {ok, Result} tag added on Erlang side. */
 #define W_BIN(buf_name, term_name, size) \
         ERL_NIF_TERM term_name; \
         unsigned char* buf_name; \
-        buf_name = enif_make_new_binary(env, size, &term_name);
-// NOTE: make_new_binary -should- turn read-only on any return (even if it's
-// not returned directly) so no release should be necessary in error cases.
+        buf_name = enif_make_new_binary(env, size, &term_name)
+/* NOTE: make_new_binary -should- turn read-only on any return (even if it's */
+/* not returned directly) so no release should be necessary in error cases. */
+
+
+/* Common crypto one-letter conventions for message/ciphertext apply. */
+
+NIF(c_box_keypair) /* XXX thread safety on RNG */
+{
+        W_BIN(pk, pk_term, crypto_box_PUBLICKEYBYTES);
+        W_BIN(sk, sk_term, crypto_box_SECRETKEYBYTES);
+        crypto_box_keypair(pk, sk);
+        return enif_make_tuple2(env, pk_term, sk_term);
+}
+
+NIF(c_box) 
+{
+        R_BIN4(m, n, pk, sk);
+        W_BIN(c, c_term, m.size);
+        crypto_box(c, m.data, m.size, n.data, pk.data, sk.data);
+        return c_term;
+}
+
+NIF(c_box_open) 
+{
+        R_BIN4(c, n, pk, sk);
+        W_BIN(m, m_term, c.size);
+        crypto_box_open(m, c.data, c.size, n.data, pk.data, sk.data);
+        return m_term;
+}
 
 NIF(c_secretbox)
 {
-        R_BIN(m, 0); R_BIN(n, 1); R_BIN(k, 2);
-        W_BIN(out, c, m.size);
-        crypto_secretbox(out, m.data, m.size, n.data, k.data);
-        return c;
+        R_BIN3(m, n, k);
+        W_BIN(c, c_term, m.size);
+        crypto_secretbox(c, m.data, m.size, n.data, k.data);
+        return c_term;
 }
 
-NIF(c_secretbox_open)
+NIF(c_secretbox_open) /* Erlang will add {ok, M} */
 {
-        R_BIN(c, 0); R_BIN(n, 1); R_BIN(k, 2);
-        W_BIN(out, m, c.size);
-        if (crypto_secretbox_open(out, c.data, c.size, n.data, k.data) == 0) {
-                return m;
+        R_BIN3(c, n, k);
+        W_BIN(m, m_term, c.size);
+        if (crypto_secretbox_open(m, c.data, c.size, n.data, k.data) == 0) {
+                return m_term;
         }
         return enif_make_atom(env, "failed");
 }
 
-NIF(c_verify_16)
+NIF(c_verify_16) /* Erlang return code conventions differ greatly from C */
 {
-        R_BIN(x, 0) R_BIN(y, 1)
+        R_BIN2(x, y);
         return enif_make_int(env, crypto_verify_16(x.data, y.data));
 }
 
 NIF(c_verify_32)
 {
-        R_BIN(x, 0) R_BIN(y, 1)
+        R_BIN2(x, y);
         return enif_make_int(env, crypto_verify_32(x.data, y.data));
 }
 
 NIF(c_hash)
 {
-        R_BIN(msg, 0)
-        W_BIN(out, hash, crypto_hash_BYTES);
-        crypto_hash(out, msg.data, msg.size);
-        return hash;
+        R_BIN(msg, 0);
+        W_BIN(h, h_term, crypto_hash_BYTES);
+        crypto_hash(h, msg.data, msg.size);
+        return h_term;
 }
-
 
 #define BIND(name,arity) {#name,arity,name}
 static ErlNifFunc nif_funcs[] = {
+        /* Public-key cryptography */
+        BIND(c_box_keypair, 0), BIND(c_box, 4), BIND(c_box_open, 4),
         /* Secret-key cryptography */
-        BIND(c_secretbox, 3),
-        BIND(c_secretbox_open, 3),
+        BIND(c_secretbox, 3), BIND(c_secretbox_open, 3),
         /* Low level functions */
-        BIND(c_hash, 1),
-        BIND(c_verify_16, 2),
-        BIND(c_verify_32, 2),
+        BIND(c_hash, 1), BIND(c_verify_16, 2), BIND(c_verify_32, 2),
 };
 
 
@@ -74,7 +114,7 @@ static int upgrade(ErlNifEnv* env, void** priv, void** old_priv,
         return 0; /* Return success so VM allows hot code reloads.
                      C library currently keeps no state, so what could
                      go wrong. Need to look at this again if opaque keys
-                     are added.
+                     are added. (Also once I settle on an RNG.)
                      */
 }
 
