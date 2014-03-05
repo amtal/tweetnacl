@@ -16,49 +16,56 @@
 
 -define(SYM_KEY, tweetnacl_symmetric_key).
 
-secretbox(_, N, _) when is_binary(N), size(N) /= ?secretbox_NONCEBYTES -> 
-    {wrong_nonce_size, size(N), ?secretbox_NONCEBYTES};
-secretbox(M, <<N:?secretbox_NONCEBYTES/binary>>, {?SYM_KEY, K}) when 
-        is_binary(N), size(K) == ?secretbox_KEYBYTES ->
-    PadM = 8*?secretbox_ZEROBYTES,
-    PadC = 8*?secretbox_BOXZEROBYTES,
-    <<0:PadC, C/binary>> = c_secretbox(<<0:PadM, M/binary>>, N, K),
-    {ok, C}.
-% where
-    c_secretbox(_, _, _) -> nif().
 
-secretbox_open(C, <<N:?secretbox_NONCEBYTES/binary>>, {?SYM_KEY, K}) when 
-        is_binary(N), size(K) == ?secretbox_KEYBYTES -> 
-    PadM = 8*?secretbox_ZEROBYTES,
-    PadC = 8*?secretbox_BOXZEROBYTES,
-    case c_secretbox_open(<<0:PadC, C/binary>>, N, K) of
+secretbox(<<M/binary>>, <<N:?secretbox_NONCEBYTES/binary>>, K) ->
+    MPad = 8*?secretbox_ZEROBYTES,
+    CPad = 8*?secretbox_BOXZEROBYTES,
+    <<0:CPad, C/binary>> = c_secretbox(<<0:MPad, M/binary>>, N, key(K)),
+    {ok, C};
+secretbox(M, N, K) -> secretbox_help(M, N, K).
+
+secretbox_open(<<C/binary>>, <<N:?secretbox_NONCEBYTES/binary>>, K) ->
+    MPad = 8*?secretbox_ZEROBYTES,
+    CPad = 8*?secretbox_BOXZEROBYTES,
+    case c_secretbox_open(<<0:CPad, C/binary>>, N, key(K)) of
         failed -> auth_failed;
-        <<0:PadM, M/binary>> -> {ok, M}
-    end.
+        <<0:MPad, M/binary>> -> {ok, M}
+    end;
+secretbox_open(C, N, K) -> secretbox_help(C, N, K).
 % where
+    secretbox_help(_, <<N/binary>>, _) when size(N) /= ?secretbox_NONCEBYTES -> 
+        {error, {nonce_size_not, ?secretbox_NONCEBYTES}};
+    secretbox_help(M, N, _) when not is_binary(M); is_binary(N) ->
+        inputs_must_be_binary;
+    secretbox_help(_, _, _) ->
+        invalid_key.
+    c_secretbox(_, _, _) -> nif().
     c_secretbox_open(_, _, _) -> nif().
+    %% XXX wrap keys in opaque ref that isn't visible in crash dumps
+    key({?SYM_KEY, <<K:?secretbox_KEYBYTES/binary>>}) -> K;
+    key(Bad) -> error(invalid_key, [Bad]).
 
+
+%% XXX bind dev/urandom with note on seeding in VMs/embedded? Can I build on 
+%% Windows with OpenSSL+rebar, is it worth keeping just for that?
 secretbox_key() -> {?SYM_KEY, crypto:strong_rand_bytes(?secretbox_KEYBYTES)}.
 
-verify_32(<<A:32/binary>>, <<B:32/binary>>) -> 
-    case c_verify_32(A, B) of
-        0 -> true;
-       -1 -> false
-    end.
-% where
-    c_verify_32(_, _) -> nif().
 
-verify_16(A, B) -> 
-    case c_verify_16(A, B) of
-        0 -> true;
-       -1 -> false
-    end.
+verify_32(<<A:32/binary>>, <<B:32/binary>>) -> is_good(c_verify_32(A, B)).
+verify_16(<<A:16/binary>>, <<B:16/binary>>) -> is_good(c_verify_16(A, B)).
 % where
+    is_good(0) -> true;
+    is_good(-1) -> false.
+    c_verify_32(_, _) -> nif().
     c_verify_16(_, _) -> nif().
 
-hash(Msg) when is_binary(Msg) -> c_hash(Msg).
+hash(<<M/binary>>) -> c_hash(M).
 % where
     c_hash(_) -> nif().
+
+%%%
+%%% NIF Setup
+%%%
 
 %% Fail if not overridden by a NIF. Allows a fallback to pure-Erlang
 %% implementations, but since this is a C binding that won't happen.

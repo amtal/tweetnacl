@@ -19,9 +19,7 @@
 
 NIF(c_secretbox)
 {
-        R_BIN(m, 0);
-        R_BIN(n, 1);
-        R_BIN(k, 2);
+        R_BIN(m, 0); R_BIN(n, 1); R_BIN(k, 2);
         W_BIN(out, c, m.size);
         crypto_secretbox(out, m.data, m.size, n.data, k.data);
         return c;
@@ -29,18 +27,8 @@ NIF(c_secretbox)
 
 NIF(c_secretbox_open)
 {
-        R_BIN(c, 0);
-        R_BIN(n, 1);
-        R_BIN(k, 2);
-        /* Lengths are only known in C for now. Need to verify them here. */
-        /*
-        if (n.size != crypto_secretbox_NONCEBYTES || 
-            k.size != crypto_secretbox_KEYBYTES) {
-                return enif_make_atom(env, "error"); // TODO: erlangy failure, not silent 
-        }
-        */
+        R_BIN(c, 0); R_BIN(n, 1); R_BIN(k, 2);
         W_BIN(out, m, c.size);
-        //memset(out, crypto_secretbox_BOXZEROBYTES, sizeof(unsigned char));
         if (crypto_secretbox_open(out, c.data, c.size, n.data, k.data) == 0) {
                 return m;
         }
@@ -49,15 +37,13 @@ NIF(c_secretbox_open)
 
 NIF(c_verify_16)
 {
-        R_BIN(x, 0)
-        R_BIN(y, 1)
+        R_BIN(x, 0) R_BIN(y, 1)
         return enif_make_int(env, crypto_verify_16(x.data, y.data));
 }
 
 NIF(c_verify_32)
 {
-        R_BIN(x, 0)
-        R_BIN(y, 1)
+        R_BIN(x, 0) R_BIN(y, 1)
         return enif_make_int(env, crypto_verify_32(x.data, y.data));
 }
 
@@ -85,7 +71,11 @@ static ErlNifFunc nif_funcs[] = {
 static int upgrade(ErlNifEnv* env, void** priv, void** old_priv,
                                          ERL_NIF_TERM load_info)
 {
-        return 0; /* Return success so VM allows hot code reloads */
+        return 0; /* Return success so VM allows hot code reloads.
+                     C library currently keeps no state, so what could
+                     go wrong. Need to look at this again if opaque keys
+                     are added.
+                     */
 }
 
 
