@@ -17,7 +17,7 @@
 // NOTE: make_new_binary -should- turn read-only on any return (even if it's
 // not returned directly) so no release should be necessary in error cases.
 
-NIF(secretbox)
+NIF(c_secretbox)
 {
         R_BIN(m, 0);
         R_BIN(n, 1);
@@ -27,7 +27,7 @@ NIF(secretbox)
         return c;
 }
 
-NIF(secretbox_open)
+NIF(c_secretbox_open)
 {
         R_BIN(c, 0);
         R_BIN(n, 1);
@@ -47,33 +47,21 @@ NIF(secretbox_open)
         return enif_make_atom(env, "failed");
 }
 
-/* Key generator, to avoid exposing crypto_secretbox_KEYBYTES.
-
-This is dumb and needs a better way. Erlang is bad at keeping values secret,
-must be stored opaquely and referenced via a ref. Extraction is an extra step
-with unwieldy name and big warning signs around it.
-*/
-NIF(secretbox_KEYBYTES)
-{
-        return enif_make_int(env, crypto_secretbox_KEYBYTES);
-}
-
-
-NIF(verify_16)
+NIF(c_verify_16)
 {
         R_BIN(x, 0)
         R_BIN(y, 1)
         return enif_make_int(env, crypto_verify_16(x.data, y.data));
 }
 
-NIF(verify_32)
+NIF(c_verify_32)
 {
         R_BIN(x, 0)
         R_BIN(y, 1)
         return enif_make_int(env, crypto_verify_32(x.data, y.data));
 }
 
-NIF(hash)
+NIF(c_hash)
 {
         R_BIN(msg, 0)
         W_BIN(out, hash, crypto_hash_BYTES);
@@ -82,15 +70,15 @@ NIF(hash)
 }
 
 
+#define BIND(name,arity) {#name,arity,name}
 static ErlNifFunc nif_funcs[] = {
         /* Secret-key cryptography */
-        {"secretbox", 3, secretbox},
-        {"secretbox_open", 3, secretbox_open},
-        {"secretbox_KEYBYTES", 0, secretbox_KEYBYTES}, /* new addition */
+        BIND(c_secretbox, 3),
+        BIND(c_secretbox_open, 3),
         /* Low level functions */
-        {"hash", 1, hash},
-        {"verify_16", 2, verify_16},
-        {"verify_32", 2, verify_32},
+        BIND(c_hash, 1),
+        BIND(c_verify_16, 2),
+        BIND(c_verify_32, 2),
 };
 
 
