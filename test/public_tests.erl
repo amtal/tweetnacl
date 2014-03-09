@@ -7,10 +7,10 @@ prop_enc_dec() ->
     ?FORALL(M, binary(),
         ?FORALL(N, binary(24),
         begin
-                {ok,PK,SK} = tweetnacl:box_keypair(),
-                {ok,C} = tweetnacl:box(M, N, PK, SK),
-                {ok,M2} = tweetnacl:box_open(C, N, PK, SK),
-                io:format("Test: ~p =?= ~p, N=~p, K=~p~n", [M,M2,N,{PK,SK}]),
+                {ok,PKA,SKA} = tweetnacl:box_keypair(), % agent A
+                {ok,PKB,SKB} = tweetnacl:box_keypair(), % agent B
+                {ok,C} = tweetnacl:box(M, N, PKB, SKA), % A sends to B
+                {ok,M2} = tweetnacl:box_open(C, N, PKA, SKB), % B receives from A
                 M==M2
         end)).
 
@@ -18,12 +18,13 @@ prop_precomp_enc_dec() ->
     ?FORALL(M, binary(),
         ?FORALL(N, binary(24),
         begin
-                {ok,PK,SK} = tweetnacl:box_keypair(),
-                K = tweetnacl:box_beforenm(PK, SK),
-                {ok,C} = tweetnacl:box_afternm(M, N, K),
-                {ok,M2} = tweetnacl:box_open_afternm(C, N, K),
-                io:format("Test: ~p =?= ~p, N=~p, K=~p~n", [M,M2,N,K]),
-                M==M2
+                {ok,PKA,SKA} = tweetnacl:box_keypair(), % agent A
+                {ok,PKB,SKB} = tweetnacl:box_keypair(), % agent B
+                KA = tweetnacl:box_beforenm(PKB, SKA),
+                KB = tweetnacl:box_beforenm(PKA, SKB), % shared key derivation
+                {ok,C} = tweetnacl:box_afternm(M, N, KA), % A sends to B
+                {ok,M2} = tweetnacl:box_open_afternm(C, N, KB), % B receives from A
+                (KA == KB) and (M==M2)
         end)).
 
 prop_keygen() ->
@@ -32,7 +33,7 @@ prop_keygen() ->
 
 proper_many_small_test_() ->
     Opts = [
-        {to_file, user},
+        {to_file, user}, % save stdout
         {max_size, 64},
         {numtests, 100}
     ],
@@ -40,7 +41,7 @@ proper_many_small_test_() ->
 
 proper_few_large_test_() ->
     Opts = [
-        {to_file, user},
+        {to_file, user}, % save stdout
         {max_size, 100000},
         {numtests, 64}
     ],
