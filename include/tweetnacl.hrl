@@ -9,3 +9,4 @@
 -define(box_BOXZEROBYTES, 16).
 -define(box_PUBLICKEYBYTES, 32).
 -define(box_SECRETKEYBYTES, 32).
+-define(box_BEFORENMBYTES, 32).

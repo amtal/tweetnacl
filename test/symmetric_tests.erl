@@ -28,14 +28,14 @@ proper_many_small_test_() ->
     Opts = [
         {to_file, user},
         {max_size, 64},
-        {numtests, 10240}
+        {numtests, 100}
     ],
     {timeout, 60, ?_assertEqual([], proper:module(?MODULE, Opts))}.
 
 proper_few_large_test_() ->
     Opts = [
         {to_file, user},
-        {max_size, 1048576},
+        {max_size, 100000},
         {numtests, 64}
     ],
     {timeout, 60, ?_assertEqual([], proper:module(?MODULE, Opts))}.

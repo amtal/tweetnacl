@@ -35,6 +35,8 @@
 
 /* Common crypto one-letter conventions for message/ciphertext apply. */
 
+/* Simple pubkey */
+
 NIF(c_box_keypair) /* XXX thread safety on RNG */
 {
         W_BIN(pk, pk_term, crypto_box_PUBLICKEYBYTES);
@@ -55,9 +57,41 @@ NIF(c_box_open)
 {
         R_BIN4(c, n, pk, sk);
         W_BIN(m, m_term, c.size);
-        crypto_box_open(m, c.data, c.size, n.data, pk.data, sk.data);
-        return m_term;
+        if (crypto_box_open(m, c.data, c.size, n.data, pk.data, sk.data) == 0) {
+                return m_term;
+        }
+        return enif_make_atom(env, "failed");
 }
+
+/* Pubkey with symmetric portion split out */
+
+NIF(c_box_beforenm)
+{
+        R_BIN2(pk, sk);
+        W_BIN(k, k_term, crypto_box_BEFORENMBYTES);
+        crypto_box_beforenm(k, pk.data, sk.data);
+        return k_term;
+}
+
+NIF(c_box_afternm) 
+{
+        R_BIN3(m, n, k);
+        W_BIN(c, c_term, m.size);
+        crypto_box_afternm(c, m.data, m.size, n.data, k.data);
+        return c_term;
+}
+
+NIF(c_box_open_afternm) 
+{
+        R_BIN3(c, n, k);
+        W_BIN(m, m_term, c.size);
+        if (crypto_box_open_afternm(m, c.data, c.size, n.data, k.data) == 0) {
+                return m_term;
+        }
+        return enif_make_atom(env, "failed");
+}
+
+/* Symmetric */
 
 NIF(c_secretbox)
 {
@@ -76,6 +110,8 @@ NIF(c_secretbox_open) /* Erlang will add {ok, M} */
         }
         return enif_make_atom(env, "failed");
 }
+
+/* Hashing and comparisons */
 
 NIF(c_verify_16) /* Erlang return code conventions differ greatly from C */
 {
@@ -97,10 +133,15 @@ NIF(c_hash)
         return h_term;
 }
 
+/* Erlang NIF export and code upgrades */
+
 #define BIND(name,arity) {#name,arity,name}
 static ErlNifFunc nif_funcs[] = {
         /* Public-key cryptography */
-        BIND(c_box_keypair, 0), BIND(c_box, 4), BIND(c_box_open, 4),
+        BIND(c_box_keypair, 0), /* keygen */
+        BIND(c_box, 4), BIND(c_box_open, 4), /* decr/encr */
+        BIND(c_box_beforenm, 2),  /* precomputation */
+        BIND(c_box_afternm, 3), BIND(c_box_open_afternm, 3), /* symmetric */
         /* Secret-key cryptography */
         BIND(c_secretbox, 3), BIND(c_secretbox_open, 3),
         /* Low level functions */

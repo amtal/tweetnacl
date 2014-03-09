@@ -12,8 +12,7 @@ tweetnacl rather than libsodium/original NaCl. Other implementation
 differences:
 
 - https://github.com/tonyg/erlang-nacl
-    - Doesn't have all interesting primitives. I want symmetric + private +
-      simple one time auth API.
+    - Doesn't have all interesting primitives. I want symmetric + private.
     - Don't care about underlying primitives, will look at benchmarks before
       deciding on beforenm/afternm.
 - https://github.com/freza/salt

@@ -8,6 +8,7 @@
 -export(
     % Public-key cryptography
     [ box_keypair/0, box/4, box_open/4
+    , box_beforenm/2, box_afternm/3, box_open_afternm/3
     % Secret-key cryptography
     , secretbox/3, secretbox_open/3, secretbox_key/0
     % Low-level functions
@@ -17,6 +18,7 @@
 -include("include/tweetnacl.hrl").
 
 -define(SYM_KEY, tweetnacl_symmetric_key).
+-define(NM_KEY, tweetnacl_nm_key).
 
 
 %% XXX opaque keys?
@@ -27,26 +29,48 @@ box_keypair() ->
     c_box_keypair() -> nif().
 
 box(<<M/binary>>, <<N:?box_NONCEBYTES/binary>>, PubKey, SecKey) ->
-    MPad = 8*?box_ZEROBYTES,
-    CPad = 8*?box_BOXZEROBYTES,
-    <<0:CPad, C/binary>> = c_box(<<0:MPad, M/binary>>, N, pubkey(PubKey),
-                                                          seckey(SecKey)),
-    {ok, C};
+    {ok, unpad_c(c_box(pad_m(M), N, pubkey(PubKey), seckey(SecKey)))};
 box(M, N, PK, SK) -> box_help(M, N, PK, SK).
-box_open(<<M/binary>>, <<N:?box_NONCEBYTES/binary>>, PubKey, SecKey) ->
-    MPad = 8*?box_ZEROBYTES,
-    CPad = 8*?box_BOXZEROBYTES,
-    <<0:MPad, C/binary>> = c_box_open(<<0:CPad, M/binary>>, N, pubkey(PubKey), 
-                                                               seckey(SecKey)),
-    {ok, C};
+
+box_open(<<C/binary>>, <<N:?box_NONCEBYTES/binary>>, PubKey, SecKey) ->
+    case c_box_open(pad_c(C), N, pubkey(PubKey), seckey(SecKey)) of
+        failed -> failed;
+        M -> {ok, unpad_m(M)}
+    end;
 box_open(C, N, PK, SK) -> box_help(C, N, PK, SK).
+
+box_beforenm(PubKey, SecKey) ->
+    {?NM_KEY, c_box_beforenm(pubkey(PubKey), seckey(SecKey))}.
+
+box_afternm(<<M/binary>>, <<N:?box_NONCEBYTES/binary>>,
+                {?NM_KEY, <<K:?box_BEFORENMBYTES/binary>>}) ->
+    {ok, unpad_c(c_box_afternm(pad_m(M), N, K))};
+box_afternm(M, N, _) -> box_help(M, N, unk, unk).
+
+box_open_afternm(<<C/binary>>, <<N:?box_NONCEBYTES/binary>>,
+                 {?NM_KEY, <<K:?box_BEFORENMBYTES/binary>>}) ->
+    case c_box_open_afternm(pad_c(C), N, K) of
+        failed -> failed;
+        M -> {ok, unpad_m(M)}
+    end;
+box_open_afternm(C, N, _) -> box_help(C, N, unk, unk).
 % where
+    %% usability errors
     box_help(_, <<N/binary>>, _, _) when size(N) /= ?box_NONCEBYTES -> 
         {error, {nonce_size_not, ?box_NONCEBYTES}};
     box_help(M, N, _, _) when not is_binary(M); is_binary(N) ->
         inputs_must_be_binary.
+    %% padding helpers; long way to go to avoid hardcoding sizes
+    pad_c(C) -> <<0:?box_BOXZEROBYTES/unit:8, C/binary>>.
+    unpad_c(<<0:?box_BOXZEROBYTES/unit:8, C/binary>>) -> C.
+    pad_m(M) -> <<0:?box_ZEROBYTES/unit:8, M/binary>>.
+    unpad_m(<<0:?box_ZEROBYTES/unit:8, M/binary>>) -> M.
+    %% NIFs
     c_box(_, _, _, _) -> nif().
     c_box_open(_, _, _, _) -> nif().
+    c_box_beforenm(_, _) -> nif().
+    c_box_afternm(_, _, _) -> nif().
+    c_box_open_afternm(_, _, _) -> nif().
     %% XXX wrap keys in opaque ref that isn't visible in crash dumps
     pubkey({public, <<K:?box_PUBLICKEYBYTES/binary>>}) -> K;
     pubkey(Bad) -> error(invalid_key, [Bad]).
@@ -55,23 +79,21 @@ box_open(C, N, PK, SK) -> box_help(C, N, PK, SK).
 
 
 secretbox(<<M/binary>>, <<N:?secretbox_NONCEBYTES/binary>>, K) ->
-    MPad = 8*?secretbox_ZEROBYTES,
-    CPad = 8*?secretbox_BOXZEROBYTES,
-    <<0:CPad, C/binary>> = c_secretbox(<<0:MPad, M/binary>>, N, key(K)),
+    <<0:?secretbox_BOXZEROBYTES/unit:8, C/binary>> = 
+        c_secretbox(<<0:?secretbox_ZEROBYTES/unit:8, M/binary>>, N, key(K)),
     {ok, C};
 secretbox(M, N, K) -> secretbox_help(M, N, K).
 secretbox_open(<<C/binary>>, <<N:?secretbox_NONCEBYTES/binary>>, K) ->
-    MPad = 8*?secretbox_ZEROBYTES,
-    CPad = 8*?secretbox_BOXZEROBYTES,
-    case c_secretbox_open(<<0:CPad, C/binary>>, N, key(K)) of
-        failed -> auth_failed;
-        <<0:MPad, M/binary>> -> {ok, M}
+    case c_secretbox_open(<<0:?secretbox_BOXZEROBYTES/unit:8, C/binary>>, N,
+                          key(K)) of
+        failed -> failed;
+        <<0:?secretbox_ZEROBYTES/unit:8, M/binary>> -> {ok, M}
     end;
 secretbox_open(C, N, K) -> secretbox_help(C, N, K).
 % where
     secretbox_help(_, <<N/binary>>, _) when size(N) /= ?secretbox_NONCEBYTES -> 
         {error, {nonce_size_not, ?secretbox_NONCEBYTES}};
-    secretbox_help(M, N, _) when not is_binary(M); is_binary(N) ->
+    secretbox_help(M, N, _) when not is_binary(M); not is_binary(N) ->
         inputs_must_be_binary.
     c_secretbox(_, _, _) -> nif().
     c_secretbox_open(_, _, _) -> nif().
