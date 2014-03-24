@@ -1,7 +1,13 @@
-%%% Catch-all wrapper for crypto_* NaCl functions.
+%%% Foolproof wrapper around (tweet)NaCl.
+%%%
+%%% - Trivial to add, without making mistakes or compromising on security.
+%%% - Tiny codebase, to ease verification despite API changes.
+%%% - Aimed for mass use with minimal misuse.
+%%%
+%%% Module is currently a catch-all wrapper for crypto_* NaCl functions.
 %%%
 %%% Will probably get split up and specialized a bit once a nice API is figured
-%%% out. The deicision isn't being hurried because a sane, safe, hard to
+%%% out. The decision isn't being hurried because a sane, safe, hard to
 %%% misuse, easy to understand, easy to learn, well documented, low-noise API
 %%% is a major project goal.
 -module(tweetnacl).
@@ -20,7 +26,17 @@
 -define(SYM_KEY, tweetnacl_symmetric_key).
 -define(NM_KEY, tweetnacl_nm_key).
 
+%% I don't think there's a way to foolproof this for people that don't
+%% understand public/private keys. They'll put the wrong ones in, then wonder
+%% why all messages get rejected. Put in some diagrams, hope that's enough?
+%% 
+%% Alternatively, could try using Remote/Local language. Or Self/Peer. Or
+%% Self/Them.
+%%
+%% Going directly to application code, the language of MyId/PeerId/MySecret
+%% may be easier to grok.
 
+%% Generate a public + private keypair.
 %% XXX opaque keys?
 box_keypair() ->
     {Pub, Priv} = c_box_keypair(),
@@ -28,10 +44,12 @@ box_keypair() ->
 % where
     c_box_keypair() -> nif().
 
+%% Wrap message in a box for PubKey, signed by SecKey.
 box(<<M/binary>>, <<N:?box_NONCEBYTES/binary>>, PubKey, SecKey) ->
     {ok, unpad_c(c_box(pad_m(M), N, pubkey(PubKey), seckey(SecKey)))};
 box(M, N, PK, SK) -> box_help(M, N, PK, SK).
 
+%% Unwrap a box with SecKey, checking that it's from PubKey.
 box_open(<<C/binary>>, <<N:?box_NONCEBYTES/binary>>, PubKey, SecKey) ->
     case c_box_open(pad_c(C), N, pubkey(PubKey), seckey(SecKey)) of
         failed -> failed;
@@ -39,6 +57,7 @@ box_open(<<C/binary>>, <<N:?box_NONCEBYTES/binary>>, PubKey, SecKey) ->
     end;
 box_open(C, N, PK, SK) -> box_help(C, N, PK, SK).
 
+%% 
 box_beforenm(PubKey, SecKey) ->
     {?NM_KEY, c_box_beforenm(pubkey(PubKey), seckey(SecKey))}.
 
