@@ -1,6 +1,8 @@
-#include <openssl/rand.h> /* current RNG source, ehhh this or urandom? */
-#include <limits.h>     /* un-unit-testable integer bounding in RNG, ehhh :| */
-#include "erl_nif.h"    /* bindings to Erlang */
+#include <fcntl.h>      /* /dev/urandom */
+#include <unistd.h>      /* /dev/urandom */
+#include <string.h>      /* memset */
+#include <limits.h>     /* un-unit-testable integer bounding in RNG :| */
+#include <erl_nif.h>    /* bindings to Erlang */
 #include "tweetnacl.h"  /* lib being wrapped */
 
 /* Simple Erlang C bindings are verbose and repetitive. If all sanitization
@@ -135,6 +137,81 @@ NIF(c_hash)
 
 /* Erlang NIF export and code upgrades */
 
+/* Globals: */
+static int f_rand = -1; /* see randombytes() */
+
+/* There's been extensive discussion on blocking vs non-blocking, and userland
+ * vs kernel RNGs. Weighing the options, I've settled on /dev/urandom. The
+ * tradeoffs are as follows:
+ *
+ * + Avoids binding to OpenSSL's shady API. [1] It's there, it's convenient,
+ *   it's unclean and shall not be used.
+ * - Windows is out. I'd like this to build on Windows just to say it does, but
+ *   there's absolutely no sane real-world use case. The people running Erlang
+ *   on Windows servers have bigger problems than a lack of accessible crypto.
+ * + Avoids the brain teaser of elegantly handling "low entropy" blocking in a
+ *   NIF inside a soft realtime VM. Aside from the fact that block-forever is a
+ *   rather nasty edge case failure, blocking that far down without killing the
+ *   scheduler will not fit within the code brevity goal set for this library.
+ * - Low-entropy embedded devices, copied virtual machines, and similar use
+ *   cases run into the seeding problem. The seeding problem is solved by
+ *   writing /dev/random to /dev/urandom on boot as per the man page. This is
+ *   an important step that deserves a very visible mention in the docs.
+ *
+ * [1] http://jbp.io/2014/01/16/openssl-rand-api
+ */
+void randombytes(unsigned char* data, unsigned long long len)
+{
+        /* Code based on nacl's devurandom.c, modified to use INT_MAX and
+         * initialize file descriptor in init()
+         */
+        int chunk;
+        while (len > 0) {
+                chunk = (len > INT_MAX)?INT_MAX:len; /* looks right! */
+                chunk = read(f_rand, data, chunk);
+                if (chunk < 1) abort();
+                /* Two possible causes for failed reads:
+                 *
+                 * 1) fd uninitialized/invalid, permanent fault
+                 * 2) byzantine transient fault of some sort
+                 *
+                 * 1 seems far more likely than 2, so we hard fault
+                 */
+                data += chunk;
+                len -= chunk;
+        }
+}
+
+static int load(ErlNifEnv* env, void** priv_data, ERL_NIF_TERM load_info)
+{
+        unsigned char rng_test[64], rng_acc = 0;
+        int i;
+        f_rand = open("/dev/urandom", O_RDONLY);
+
+        if (f_rand == -1) return -1; /* Running on Windows? */
+
+        memset(rng_test, 0, 64*sizeof(char));
+        randombytes(rng_test, 64);
+        for (i=0; i<64; i++) rng_acc |= rng_test[i];
+        if (rng_acc == 0) return -1; /* RNG is a NOP for whatever reason */
+
+        return 0;
+}
+
+static void unload(ErlNifEnv* env, void* priv_data)
+{
+        close(f_rand); /* any errors ignored */
+}
+
+static int upgrade(ErlNifEnv* env, void** priv, void** old_priv,
+                                         ERL_NIF_TERM load_info)
+{
+        return 0; /* Return success so VM allows hot code reloads.
+                     C library currently keeps no state, aside from urandom
+                     fd which can be re-used.
+                     */
+}
+
 #define BIND(name,arity) {#name,arity,name}
 static ErlNifFunc nif_funcs[] = {
         /* Public-key cryptography */
@@ -148,84 +225,5 @@ static ErlNifFunc nif_funcs[] = {
         BIND(c_hash, 1), BIND(c_verify_16, 2), BIND(c_verify_32, 2),
 };
 
-
-static int upgrade(ErlNifEnv* env, void** priv, void** old_priv,
-                                         ERL_NIF_TERM load_info)
-{
-        return 0; /* Return success so VM allows hot code reloads.
-                     C library currently keeps no state, so what could
-                     go wrong. Need to look at this again if opaque keys
-                     are added. (Also once I settle on an RNG.)
-                     */
-}
-
-
-/* Adhering to the NaCl coding advice at http://nacl.cr.yp.to/internals.html
- * just so happens to produce pure functions that are reentrant. As such,
- * hot code reloads should "just work". We just need to inform the BEAM VM of
- * that.
- */
-ERL_NIF_INIT(tweetnacl, nif_funcs,
-        NULL,   /* load: no global state */
-        NULL,   /* reload: one more deprecated experiment that turned
-                           out to be a bad idea, added to the legacy support
-                           pile :) */
-        upgrade,/* upgrade: must return success, or reload canceled */
-        NULL);  /* unload: no global state */
-
-
-
-
-/* Problem: how to neatly handle low entropy?
- *
- * Blocking sucks, but there's no mechanism for asserting failures in tweetnacl's 
- * C code short of faulting the entire node. And that's an Erlang no-no.
- * Blocking sucks extra-hard due to NIF interaction with the scheduler. Producing
- * an exception is probably best... But is a nasty surprise when switching 
- * architectures and traffic patterns.
- *
- * Ideal would be a user configured slider: 
- *  - On one side, high key churn + short term keys + high entropy systems.
- *  - On the other side, rare key generation + long term keys + low entropy VMs.
- *
- *  Switch between /dev/urandom and /dev/random then. OpenSSL's RAND_pseudo_bytes 
- *  may be more cross-platform... Although who's really going to run this on
- *  Windows?
- *
- *  Pass it as a parameter to app startup? Then it's a node-global config setting?
- *  Really, /dev/urandom is good enough outside edge cases like VMs generating
- *  LTS/signing keys. Which... Probably describes your average VPS running the
- *  latest dogecoin service. Hrm.
- *
- *
- *  Slept on it. 
- *
- *  Tweetnacl should to be a pervasive encryption library. You use it on
- *  everything, because you can. It should encourage short term keys, backed by
- *  lots of medium term keys... RNG blocking is for the edge case of
- *  low-entropy device trying to generate a long term key right after startup.
- *
- *  This is a reasonable edge case, but given the awkwardness of shoehorning a
- *  blocking keygen option for longterm keys on low entropy devices into the
- *  existing API it's getting dropped. Non-blocking RNGs ftw.
- *
- *
- *  Of course, this is further complicated by OpenSSL's RAND_bytes being a bit of a clusterfuck. In practice, theoretical discussions of what an ideal CSPRNG looks like, there's this:
- *
- *  http://jbp.io/2014/01/16/openssl-rand-api/
- *
- *  I'm gonna need to sleep on it some more.
- */
-void randombytes(unsigned char* data, unsigned long long len)
-{
-        do {
-                /* http://www.openssl.org/docs/crypto/RAND_bytes.html */
-                int chunk = (len > INT_MAX)?INT_MAX:len;
-                if (RAND_bytes(data, chunk) != 1) {
-                        /* This is very, very, very un-Erlang. */
-                        abort();
-                }
-                len -= chunk;
-                data += chunk;
-        } while (len > INT_MAX);
-}
+/* NIF lifecycle functions get used for initializing singletons. */
+ERL_NIF_INIT(tweetnacl, nif_funcs, load, NULL, upgrade, unload);
