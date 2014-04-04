@@ -165,18 +165,21 @@ void randombytes(unsigned char* data, unsigned long long len)
         /* Code based on nacl's devurandom.c, modified to use INT_MAX and
          * initialize file descriptor in init()
          */
-        int chunk;
+        int chunk, bytes_read;
         while (len > 0) {
                 chunk = (len > INT_MAX)?INT_MAX:len; /* looks right! */
-                chunk = read(f_rand, data, chunk);
-                if (chunk < 1) abort();
+                bytes_read = read(f_rand, data, chunk);
+                if (bytes_read < 1) abort();
                 /* Two possible causes for failed reads:
                  *
                  * 1) fd uninitialized/invalid, permanent fault
                  * 2) byzantine transient fault of some sort
                  *
                  * 1 seems far more likely than 2, so we hard fault
+                 *
+                 * End of file on urandom (0) also treated as fault.
                  */
+                if (bytes_read < chunk) chunk = bytes_read;
                 data += chunk;
                 len -= chunk;
         }
