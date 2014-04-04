@@ -1,8 +1,5 @@
 Tweetnacl is a research project to improve the state of Erlang crypto.
 
-
-# Versioning - WARNING EXPERIMENTAL CODE
-
 API and codebase in flux while in v0.0.X, wear helmet while using.
 
 
