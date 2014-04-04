@@ -1,18 +1,22 @@
-#include <fcntl.h>      /* /dev/urandom */
-#include <unistd.h>      /* /dev/urandom */
-#include <string.h>      /* memset */
-#include <limits.h>     /* un-unit-testable integer bounding in RNG :| */
-#include <erl_nif.h>    /* bindings to Erlang */
-#include "tweetnacl.h"  /* lib being wrapped */
-
-/* Simple Erlang C bindings are verbose and repetitive. If all sanitization
+/* Minimal glue layer for tweetnacl.c
+ *
+ * Simple Erlang C bindings are verbose and repetitive. If all sanitization
  * and padding is done in Erlang, the C code should become trivial. Since
  * it's trivial, trivial macros can be used ASSUMING:
  *
  * - Arguments are names, numbers, or struct members. NO EXPRESSIONS.
  * - Resulting eyeball-seconds saving is significant, IE lots of boilerplate
  *   gone.
+ *
+ * Standard crypto one-letter naming conventions apply as usual.
  */
+#include <fcntl.h>      /* /dev/urandom */
+#include <unistd.h>     /* /dev/urandom */
+#include <string.h>     /* memset */
+#include <limits.h>     /* un-unit-testable integer bounding in RNG :| */
+#include <erl_nif.h>    /* bindings to Erlang */
+#include "tweetnacl.h"  /* lib being wrapped */
+
 
 /* All NIFs look like this. */
 #define NIF(name) static ERL_NIF_TERM name(ErlNifEnv* env, \
@@ -35,11 +39,7 @@
 /* not returned directly) so no release should be necessary in error cases. */
 
 
-/* Common crypto one-letter conventions for message/ciphertext apply. */
-
-/* Simple pubkey */
-
-NIF(c_box_keypair) /* XXX thread safety on RNG */
+NIF(c_box_keypair) 
 {
         W_BIN(pk, pk_term, crypto_box_PUBLICKEYBYTES);
         W_BIN(sk, sk_term, crypto_box_SECRETKEYBYTES);
@@ -55,7 +55,7 @@ NIF(c_box)
         return c_term;
 }
 
-NIF(c_box_open) 
+NIF(c_box_open) /* Erlang will add {ok, M} */
 {
         R_BIN4(c, n, pk, sk);
         W_BIN(m, m_term, c.size);
@@ -64,8 +64,6 @@ NIF(c_box_open)
         }
         return enif_make_atom(env, "failed");
 }
-
-/* Pubkey with symmetric portion split out */
 
 NIF(c_box_beforenm)
 {
@@ -93,7 +91,13 @@ NIF(c_box_open_afternm)
         return enif_make_atom(env, "failed");
 }
 
-/* Symmetric */
+void randombytes(unsigned char* data, unsigned long long len);
+NIF(c_secretbox_key) 
+{
+        W_BIN(k, k_term, crypto_secretbox_KEYBYTES);
+        randombytes(k, crypto_secretbox_KEYBYTES);
+        return k_term;
+}
 
 NIF(c_secretbox)
 {
@@ -113,15 +117,7 @@ NIF(c_secretbox_open) /* Erlang will add {ok, M} */
         return enif_make_atom(env, "failed");
 }
 
-/* Hashing and comparisons */
-
-NIF(c_verify_16) /* Erlang return code conventions differ greatly from C */
-{
-        R_BIN2(x, y);
-        return enif_make_int(env, crypto_verify_16(x.data, y.data));
-}
-
-NIF(c_verify_32)
+NIF(c_verify_32) /* what (good) possible use case does this have? */
 {
         R_BIN2(x, y);
         return enif_make_int(env, crypto_verify_32(x.data, y.data));
@@ -223,9 +219,10 @@ static ErlNifFunc nif_funcs[] = {
         BIND(c_box_beforenm, 2),  /* precomputation */
         BIND(c_box_afternm, 3), BIND(c_box_open_afternm, 3), /* symmetric */
         /* Secret-key cryptography */
+        BIND(c_secretbox_key, 0), 
         BIND(c_secretbox, 3), BIND(c_secretbox_open, 3),
         /* Low level functions */
-        BIND(c_hash, 1), BIND(c_verify_16, 2), BIND(c_verify_32, 2),
+        BIND(c_hash, 1), BIND(c_verify_32, 2),
 };
 
 /* NIF lifecycle functions get used for initializing singletons. */

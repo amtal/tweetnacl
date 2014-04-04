@@ -13,4 +13,5 @@ m(crypto_box_BOXZEROBYTES);
 m(crypto_box_PUBLICKEYBYTES);
 m(crypto_box_SECRETKEYBYTES);
 m(crypto_box_BEFORENMBYTES);
+m(crypto_hash_BYTES);
 }

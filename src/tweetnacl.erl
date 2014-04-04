@@ -1,30 +1,36 @@
-%%% Foolproof wrapper around (tweet)NaCl.
+%%% Interface with Erlang types+conventions around tweetnacl C API.
 %%%
-%%% - Trivial to add, without making mistakes or compromising on security.
-%%% - Tiny codebase, to ease verification despite API changes.
-%%% - Aimed for mass use with minimal misuse.
+%%% All inputs are binaries, flatten iolists beforehand.
 %%%
-%%% Module is currently a catch-all wrapper for crypto_* NaCl functions.
+%%% Typical one-letter naming conventions at play:
 %%%
-%%% Will probably get split up and specialized a bit once a nice API is figured
-%%% out. The decision isn't being hurried because a sane, safe, hard to
-%%% misuse, easy to understand, easy to learn, well documented, low-noise API
-%%% is a major project goal.
+%%% - plaintext (M)essages
+%%% - encrypted+authenticated (C)iphertexts
+%%% - secret (K)eys
+%%% - a (N)once is a "number used once" and only once for a given key
+%%%
+%%% Note that nonces MUST NOT repeat for a given key. This includes different
+%%% directions (receive and transmit should have distinct nonces) or sessions
+%%% that re-use the same key.
+%%%
+%%% Random numbers sourced from /dev/urandom - if your system has low entropy
+%%% on boot (cloned VM, embedded) seed /dev/urandom from /dev/random during
+%%% provisioning then propagate a seed through reboots. See /dev/urandom
+%%% manpage for instructions.
 -module(tweetnacl).
 -export(
     % Public-key cryptography
     [ box_keypair/0, box/4, box_open/4
     , box_beforenm/2, box_afternm/3, box_open_afternm/3
-    % Secret-key cryptography
+    % Symmetric-key cryptography
     , secretbox/3, secretbox_open/3, secretbox_key/0
-    % Low-level functions
-    , verify_16/2, verify_32/2, hash/1
+    % Hash functions
+    , hash/1
+    % Unknown purpose given primitives available
+    , verify_32/2
     ]).
--on_load(init/0).
+-on_load(init_nif/0).
 -include("include/tweetnacl.hrl").
-
--define(SYM_KEY, tweetnacl_symmetric_key).
--define(NM_KEY, tweetnacl_nm_key).
 
 %% I don't think there's a way to foolproof this for people that don't
 %% understand public/private keys. They'll put the wrong ones in, then wonder
@@ -36,107 +42,112 @@
 %% Going directly to application code, the language of MyId/PeerId/MySecret
 %% may be easier to grok.
 
-%% Generate a public + private keypair.
-%% XXX opaque keys?
+%%%
+%%% Simple asymmetric authenticated encryption.
+%%%
+
 box_keypair() ->
     {Pub, Priv} = c_box_keypair(),
-    {ok, {public, Pub}, {secret, Priv}}.
-% where
-    c_box_keypair() -> nif().
+    {Pub, {'$secret_key', Priv}}.
 
-%% Wrap message in a box for PubKey, signed by SecKey.
-box(<<M/binary>>, <<N:?box_NONCEBYTES/binary>>, PubKey, SecKey) ->
-    {ok, unpad_c(c_box(pad_m(M), N, pubkey(PubKey), seckey(SecKey)))};
-box(M, N, PK, SK) -> box_help(M, N, PK, SK).
+box(M, N, PubKey, SecKey) ->
+    unpad_c(c_box(pad_m(M), nonce(N), pubkey(PubKey), seckey(SecKey))).
 
-%% Unwrap a box with SecKey, checking that it's from PubKey.
-box_open(<<C/binary>>, <<N:?box_NONCEBYTES/binary>>, PubKey, SecKey) ->
-    case c_box_open(pad_c(C), N, pubkey(PubKey), seckey(SecKey)) of
+box_open(C, N, PubKey, SecKey) ->
+    case c_box_open(pad_c(C), nonce(N), pubkey(PubKey), seckey(SecKey)) of
         failed -> failed;
         M -> {ok, unpad_m(M)}
-    end;
-box_open(C, N, PK, SK) -> box_help(C, N, PK, SK).
+    end.
 
-%% 
+%%%
+%%% Optimized asymmetric with message-agnostic precomputation split into
+%%% *_beforenm/2, and message-specific processing into *_afternm/3.
+%%%
+
 box_beforenm(PubKey, SecKey) ->
-    {?NM_KEY, c_box_beforenm(pubkey(PubKey), seckey(SecKey))}.
+    {'$nm_symmetric_key', c_box_beforenm(pubkey(PubKey), seckey(SecKey))}.
 
-box_afternm(<<M/binary>>, <<N:?box_NONCEBYTES/binary>>,
-                {?NM_KEY, <<K:?box_BEFORENMBYTES/binary>>}) ->
-    {ok, unpad_c(c_box_afternm(pad_m(M), N, K))};
-box_afternm(M, N, _) -> box_help(M, N, unk, unk).
+box_afternm(<<M/binary>>, N, K) ->
+    unpad_c(c_box_afternm(pad_m(M), nonce(N), nm_sym_key(K))).
 
-box_open_afternm(<<C/binary>>, <<N:?box_NONCEBYTES/binary>>,
-                 {?NM_KEY, <<K:?box_BEFORENMBYTES/binary>>}) ->
-    case c_box_open_afternm(pad_c(C), N, K) of
+box_open_afternm(<<C/binary>>, N, K) ->
+    case c_box_open_afternm(pad_c(C), nonce(N), nm_sym_key(K)) of
         failed -> failed;
         M -> {ok, unpad_m(M)}
-    end;
-box_open_afternm(C, N, _) -> box_help(C, N, unk, unk).
+    end.
 % where
-    %% usability errors
-    box_help(_, <<N/binary>>, _, _) when size(N) /= ?box_NONCEBYTES -> 
-        {error, {nonce_size_not, ?box_NONCEBYTES}};
-    box_help(M, N, _, _) when not is_binary(M); is_binary(N) ->
-        inputs_must_be_binary.
-    %% padding helpers; long way to go to avoid hardcoding sizes
-    pad_c(C) -> <<0:?box_BOXZEROBYTES/unit:8, C/binary>>.
+    %% sanitizers
+    nonce(<<N:?box_NONCEBYTES/binary>>) -> N;
+    nonce(<<N/binary>>) -> 
+        % Usability convention: detailed warnings for wrong user-provided sizes,
+        % but sparse Erlang warnings for square-peg-in-round-slot mixups. Detailed
+        % errors are good, but not too detailed.
+        error({nonce_size_not, ?box_NONCEBYTES}, N).
+    pubkey(<<K:?box_PUBLICKEYBYTES/binary>>) -> K.
+    seckey({'$secret_key', <<K:?box_SECRETKEYBYTES/binary>>}) -> K.
+    nm_sym_key({'$nm_symmetric_key', <<K:?box_BEFORENMBYTES/binary>>}) -> K.
+    %% padding
+    pad_c(<<C/binary>>) -> <<0:?box_BOXZEROBYTES/unit:8, C/binary>>.
     unpad_c(<<0:?box_BOXZEROBYTES/unit:8, C/binary>>) -> C.
-    pad_m(M) -> <<0:?box_ZEROBYTES/unit:8, M/binary>>.
+    pad_m(<<M/binary>>) -> <<0:?box_ZEROBYTES/unit:8, M/binary>>.
     unpad_m(<<0:?box_ZEROBYTES/unit:8, M/binary>>) -> M.
     %% NIFs
+    c_box_keypair() -> nif().
     c_box(_, _, _, _) -> nif().
     c_box_open(_, _, _, _) -> nif().
     c_box_beforenm(_, _) -> nif().
     c_box_afternm(_, _, _) -> nif().
     c_box_open_afternm(_, _, _) -> nif().
-    %% XXX wrap keys in opaque ref that isn't visible in crash dumps
-    pubkey({public, <<K:?box_PUBLICKEYBYTES/binary>>}) -> K;
-    pubkey(Bad) -> error(invalid_key, [Bad]).
-    seckey({secret, <<K:?box_SECRETKEYBYTES/binary>>}) -> K;
-    seckey(Bad) -> error(invalid_key, [Bad]).
 
+%%% 
+%%% Symmetric authenticated encryption
+%%%
 
-secretbox(<<M/binary>>, <<N:?secretbox_NONCEBYTES/binary>>, K) ->
-    <<0:?secretbox_BOXZEROBYTES/unit:8, C/binary>> = 
-        c_secretbox(<<0:?secretbox_ZEROBYTES/unit:8, M/binary>>, N, key(K)),
-    {ok, C};
-secretbox(M, N, K) -> secretbox_help(M, N, K).
-secretbox_open(<<C/binary>>, <<N:?secretbox_NONCEBYTES/binary>>, K) ->
-    case c_secretbox_open(<<0:?secretbox_BOXZEROBYTES/unit:8, C/binary>>, N,
-                          key(K)) of
+%% XXX switch to /dev/urandom, or stick with underlying RAND_bytes? be consistent...
+secretbox_key() -> {'$symmetric_key', c_secretbox_key()}.
+
+secretbox(<<M/binary>>, N, K) -> 
+    sym_unpad_c(c_secretbox(sym_pad_m(M), sym_nonce(N), key(K))).
+
+secretbox_open(<<C/binary>>, N, K) ->
+    case c_secretbox_open(sym_pad_c(C), sym_nonce(N), key(K)) of
         failed -> failed;
         <<0:?secretbox_ZEROBYTES/unit:8, M/binary>> -> {ok, M}
-    end;
-secretbox_open(C, N, K) -> secretbox_help(C, N, K).
+    end.
 % where
-    secretbox_help(_, <<N/binary>>, _) when size(N) /= ?secretbox_NONCEBYTES -> 
-        {error, {nonce_size_not, ?secretbox_NONCEBYTES}};
-    secretbox_help(M, N, _) when not is_binary(M); not is_binary(N) ->
-        inputs_must_be_binary.
+    %% sanitizers
+    sym_nonce(<<N:?secretbox_NONCEBYTES/binary>>) -> N;
+    sym_nonce(<<N/binary>>) -> error({nonce_size_not, ?secretbox_NONCEBYTES}, N).
+    key({'$symmetric_key', <<K:?secretbox_KEYBYTES/binary>>}) -> K;
+    key(Bad) -> error(invalid_key, [Bad]).
+    %% padding
+    sym_pad_m(M) -> <<0:?secretbox_ZEROBYTES/unit:8, M/binary>>.
+    sym_unpad_c(<<0:?secretbox_BOXZEROBYTES/unit:8, C/binary>>) -> C.
+    sym_pad_c(C) -> <<0:?secretbox_BOXZEROBYTES/unit:8, C/binary>>.
+    %% nifs
+    c_secretbox_key() -> nif().
     c_secretbox(_, _, _) -> nif().
     c_secretbox_open(_, _, _) -> nif().
-    %% XXX wrap keys in opaque ref that isn't visible in crash dumps
-    key({?SYM_KEY, <<K:?secretbox_KEYBYTES/binary>>}) -> K;
-    key(Bad) -> error(invalid_key, [Bad]).
 
+%% SHA-512, for key identifiers and whatnot.
+hash(<<Bin/binary>>) -> c_hash(Bin).
+% where
+    c_hash(_) -> nif().
 
-%% XXX bind dev/urandom with note on seeding in VMs/embedded? Can I build on 
-%% Windows with OpenSSL+rebar, is it worth keeping just for that?
-secretbox_key() -> {?SYM_KEY, crypto:strong_rand_bytes(?secretbox_KEYBYTES)}.
-
-
+%% I like cryptocoding's recommendation to have a safe memory comparison
+%% primitive as the default, and avoid early-return memcmps alltogether in
+%% security-critical code. Overriding == and pmatching isn't an option; what is
+%% the use case for verify_16 and verify_32? 
+%%
+%% Could try providing hash(M) and is_hash_equal(M, H) instead. Although,
+%% what's the use case for a hash primitive with constant time checks?
+%% This isn't a password library. Delete altogether?
 verify_32(<<A:32/binary>>, <<B:32/binary>>) -> is_good(c_verify_32(A, B)).
-verify_16(<<A:16/binary>>, <<B:16/binary>>) -> is_good(c_verify_16(A, B)).
 % where
     is_good(0) -> true;
     is_good(-1) -> false.
     c_verify_32(_, _) -> nif().
-    c_verify_16(_, _) -> nif().
 
-hash(<<M/binary>>) -> c_hash(M).
-% where
-    c_hash(_) -> nif().
 
 %%%
 %%% NIF Setup
@@ -149,11 +160,9 @@ nif() -> exit({nif_not_loaded, ?MODULE}).
 -define(APPNAME, tweetnacl). % name of .app file
 -define(LIBNAME, tweetnacl). % library, so_name in rebar.config
 
-%% Module initialization.
-%%
 %% Called by -on_load attribute, should always load the NIF which will override
 %% most of our exported functions with C implementations.
-init() ->
+init_nif() ->
     SoName = case code:priv_dir(?APPNAME) of
         {error, bad_name} ->
             case filelib:is_dir(filename:join(["..", priv])) of

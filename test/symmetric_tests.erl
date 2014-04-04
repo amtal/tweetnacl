@@ -3,18 +3,15 @@
 -include_lib("proper/include/proper.hrl").
 -include_lib("eunit/include/eunit.hrl").
 
-prop_constant_comp32() ->
-    ?FORALL(B, binary(32), true == tweetnacl:verify_32(B, B)).
-
-prop_constant_comp16() ->
-    ?FORALL(B, binary(16), true == tweetnacl:verify_16(B, B)).
+prop_hash_comp() ->
+    ?FORALL(B, binary(), tweetnacl:hash(B) == tweetnacl:hash(B)).
 
 prop_enc_dec() ->
     ?FORALL(M, binary(),
         ?FORALL(N, binary(24),
         begin
                 K = tweetnacl:secretbox_key(),
-                {ok,C} = tweetnacl:secretbox(M, N, K),
+                C = tweetnacl:secretbox(M, N, K),
                 {ok,M2} = tweetnacl:secretbox_open(C, N, K),
                 io:format("Test: ~p =?= ~p, N=~p, K=~p~n", [M,M2,N,K]),
                 M==M2
