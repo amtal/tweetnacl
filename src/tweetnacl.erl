@@ -19,42 +19,32 @@
 %%% manpage for instructions.
 -module(tweetnacl).
 -export(
-    % Public-key cryptography
+    % Public-key authenticated encryption
     [ box_keypair/0, box/4, box_open/4
     , box_beforenm/2, box_afternm/3, box_open_afternm/3
-    % Symmetric-key cryptography
+    % Public-key signatures
+    , sign_keypair/0, sign/2, sign_open/2
+    % Symmetric-key authenticated encryption
     , secretbox/3, secretbox_open/3, secretbox_key/0
     % Hash functions
     , hash/1
-    % Unknown purpose given primitives available
-    , verify_32/2
     ]).
 -on_load(init_nif/0).
 -include("include/tweetnacl.hrl").
-
-%% I don't think there's a way to foolproof this for people that don't
-%% understand public/private keys. They'll put the wrong ones in, then wonder
-%% why all messages get rejected. Put in some diagrams, hope that's enough?
-%% 
-%% Alternatively, could try using Remote/Local language. Or Self/Peer. Or
-%% Self/Them.
-%%
-%% Going directly to application code, the language of MyId/PeerId/MySecret
-%% may be easier to grok.
 
 %%%
 %%% Simple asymmetric authenticated encryption.
 %%%
 
 box_keypair() ->
-    {Pub, Priv} = c_box_keypair(),
-    {Pub, {'$secret_key', Priv}}.
+    {Public, Secret} = c_box_keypair(),
+    {Public, {'$box_key', Secret}}.
 
-box(M, N, PubKey, SecKey) ->
-    unpad_c(c_box(pad_m(M), nonce(N), pubkey(PubKey), seckey(SecKey))).
+box(M, N, PeerPub, OwnSec) ->
+    unpad_c(c_box(pad_m(M), nonce(N), pubkey(PeerPub), seckey(OwnSec))).
 
-box_open(C, N, PubKey, SecKey) ->
-    case c_box_open(pad_c(C), nonce(N), pubkey(PubKey), seckey(SecKey)) of
+box_open(C, N, PeerPub, OwnSec) ->
+    case c_box_open(pad_c(C), nonce(N), pubkey(PeerPub), seckey(OwnSec)) of
         failed -> failed;
         M -> {ok, unpad_m(M)}
     end.
@@ -64,14 +54,14 @@ box_open(C, N, PubKey, SecKey) ->
 %%% *_beforenm/2, and message-specific processing into *_afternm/3.
 %%%
 
-box_beforenm(PubKey, SecKey) ->
-    {'$nm_symmetric_key', c_box_beforenm(pubkey(PubKey), seckey(SecKey))}.
+box_beforenm(PeerPub, OwnSec) ->
+    {'$nm_symmetric_key', c_box_beforenm(pubkey(PeerPub), seckey(OwnSec))}.
 
-box_afternm(<<M/binary>>, N, K) ->
-    unpad_c(c_box_afternm(pad_m(M), nonce(N), nm_sym_key(K))).
+box_afternm(<<M/binary>>, N, SharedSec) ->
+    unpad_c(c_box_afternm(pad_m(M), nonce(N), nm_sym_key(SharedSec))).
 
-box_open_afternm(<<C/binary>>, N, K) ->
-    case c_box_open_afternm(pad_c(C), nonce(N), nm_sym_key(K)) of
+box_open_afternm(<<C/binary>>, N, SharedSec) ->
+    case c_box_open_afternm(pad_c(C), nonce(N), nm_sym_key(SharedSec)) of
         failed -> failed;
         M -> {ok, unpad_m(M)}
     end.
@@ -80,11 +70,11 @@ box_open_afternm(<<C/binary>>, N, K) ->
     nonce(<<N:?box_NONCEBYTES/binary>>) -> N;
     nonce(<<N/binary>>) -> 
         % Usability convention: detailed warnings for wrong user-provided sizes,
-        % but sparse Erlang warnings for square-peg-in-round-slot mixups. Detailed
+        % but laconic Erlang warnings for square-peg-in-round-slot mixups. Detailed
         % errors are good, but not too detailed.
         error({nonce_size_not, ?box_NONCEBYTES}, N).
     pubkey(<<K:?box_PUBLICKEYBYTES/binary>>) -> K.
-    seckey({'$secret_key', <<K:?box_SECRETKEYBYTES/binary>>}) -> K.
+    seckey({'$box_key', <<K:?box_SECRETKEYBYTES/binary>>}) -> K.
     nm_sym_key({'$nm_symmetric_key', <<K:?box_BEFORENMBYTES/binary>>}) -> K.
     %% padding
     pad_c(<<C/binary>>) -> <<0:?box_BOXZEROBYTES/unit:8, C/binary>>.
@@ -100,11 +90,33 @@ box_open_afternm(<<C/binary>>, N, K) ->
     c_box_open_afternm(_, _, _) -> nif().
 
 %%% 
+%%% Public key signatures
+%%%
+
+sign_keypair() ->
+    {Public, Secret} = c_sign_keypair(),
+    {Public, {'$signing_key', Secret}}.
+
+sign(<<M/binary>>, Secret) ->
+    c_sign(M, sign_seckey(Secret)).
+
+sign_open(<<SignedM/binary>>, Public) ->
+    case c_sign_open(SignedM, sign_pubkey(Public)) of
+        failed -> failed;
+        <<M/binary>> -> {ok, M}
+    end.
+% where
+    sign_seckey({'$signing_key', <<K:?sign_SECRETKEYBYTES/binary>>}) -> K.
+    sign_pubkey(<<K:?sign_PUBLICKEYBYTES/binary>>) -> K.
+    c_sign_keypair() -> nif().
+    c_sign(_, _) -> nif().
+    c_sign_open(_, _) -> nif().
+
+%%% 
 %%% Symmetric authenticated encryption
 %%%
 
-%% XXX switch to /dev/urandom, or stick with underlying RAND_bytes? be consistent...
-secretbox_key() -> {'$symmetric_key', c_secretbox_key()}.
+secretbox_key() -> {'$symmetric_key', c_secretbox_key()}. % /dev/urandom wrapper
 
 secretbox(<<M/binary>>, N, K) -> 
     sym_unpad_c(c_secretbox(sym_pad_m(M), sym_nonce(N), key(K))).
@@ -133,20 +145,6 @@ secretbox_open(<<C/binary>>, N, K) ->
 hash(<<Bin/binary>>) -> c_hash(Bin).
 % where
     c_hash(_) -> nif().
-
-%% I like cryptocoding's recommendation to have a safe memory comparison
-%% primitive as the default, and avoid early-return memcmps alltogether in
-%% security-critical code. Overriding == and pmatching isn't an option; what is
-%% the use case for verify_16 and verify_32? 
-%%
-%% Could try providing hash(M) and is_hash_equal(M, H) instead. Although,
-%% what's the use case for a hash primitive with constant time checks?
-%% This isn't a password library. Delete altogether?
-verify_32(<<A:32/binary>>, <<B:32/binary>>) -> is_good(c_verify_32(A, B)).
-% where
-    is_good(0) -> true;
-    is_good(-1) -> false.
-    c_verify_32(_, _) -> nif().
 
 
 %%%

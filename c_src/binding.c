@@ -117,10 +117,38 @@ NIF(c_secretbox_open) /* Erlang will add {ok, M} */
         return enif_make_atom(env, "failed");
 }
 
-NIF(c_verify_32) /* what (good) possible use case does this have? */
+NIF(c_sign_keypair)
 {
-        R_BIN2(x, y);
-        return enif_make_int(env, crypto_verify_32(x.data, y.data));
+        W_BIN(pk, pk_term, crypto_sign_PUBLICKEYBYTES);
+        W_BIN(sk, sk_term, crypto_sign_SECRETKEYBYTES);
+        crypto_sign_keypair(pk, sk);
+        return enif_make_tuple2(env, pk_term, sk_term);
+}
+
+NIF(c_sign)
+{
+        R_BIN2(m, sk);
+        W_BIN(sm, sm_term, m.size + crypto_sign_BYTES); // so much for no expressions!
+        unsigned long long sm_size;
+        crypto_sign(sm, &sm_size, m.data, m.size, sk.data);
+        if (sm_size != (m.size + crypto_sign_BYTES)) {
+                return enif_make_badarg(env); // unreachable
+        }
+        return sm_term;
+}
+
+NIF(c_sign_open)
+{
+        R_BIN2(sm, pk);
+        W_BIN(m, m_term, sm.size - crypto_sign_BYTES);
+        unsigned long long m_size;
+        if (crypto_sign_open(m, &m_size, sm.data, sm.size, pk.data) == 0) {
+                if (m_size != (sm.size - crypto_sign_BYTES)) {
+                        return enif_make_badarg(env); // unreachable
+                }
+                return m_term;
+        }
+        return enif_make_atom(env, "failed");
 }
 
 NIF(c_hash)
@@ -213,16 +241,19 @@ static int upgrade(ErlNifEnv* env, void** priv, void** old_priv,
 
 #define BIND(name,arity) {#name,arity,name}
 static ErlNifFunc nif_funcs[] = {
-        /* Public-key cryptography */
+        /* Public-key authenticated encryption */
         BIND(c_box_keypair, 0), /* keygen */
         BIND(c_box, 4), BIND(c_box_open, 4), /* decr/encr */
         BIND(c_box_beforenm, 2),  /* precomputation */
         BIND(c_box_afternm, 3), BIND(c_box_open_afternm, 3), /* symmetric */
-        /* Secret-key cryptography */
+        /* Secret-key authenticated encryption */
         BIND(c_secretbox_key, 0), 
         BIND(c_secretbox, 3), BIND(c_secretbox_open, 3),
+        /* Signatures */
+        BIND(c_sign_keypair, 0),
+        BIND(c_sign, 2), BIND(c_sign_open, 2),
         /* Low level functions */
-        BIND(c_hash, 1), BIND(c_verify_32, 2),
+        BIND(c_hash, 1),
 };
 
 /* NIF lifecycle functions get used for initializing singletons. */
