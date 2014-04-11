@@ -103,7 +103,10 @@ sign(<<M/binary>>, Secret) ->
 sign_open(<<SignedM/binary>>, Public) ->
     case c_sign_open(SignedM, sign_pubkey(Public)) of
         failed -> failed;
-        <<M/binary>> -> {ok, M}
+        Padded -> 
+            MLen = size(Padded) - ?sign_BYTES,
+            <<M:MLen/binary, _/binary>> = Padded,
+            {ok, M}
     end.
 % where
     sign_seckey({'$signing_key', <<K:?sign_SECRETKEYBYTES/binary>>}) -> K.

@@ -128,11 +128,11 @@ NIF(c_sign_keypair)
 NIF(c_sign)
 {
         R_BIN2(m, sk);
-        W_BIN(sm, sm_term, m.size + crypto_sign_BYTES); // so much for no expressions!
+        W_BIN(sm, sm_term, m.size + crypto_sign_BYTES); /* so much for no expressions! */
         unsigned long long sm_size;
         crypto_sign(sm, &sm_size, m.data, m.size, sk.data);
         if (sm_size != (m.size + crypto_sign_BYTES)) {
-                return enif_make_badarg(env); // unreachable
+                return enif_make_badarg(env); /* unreachable */
         }
         return sm_term;
 }
@@ -140,11 +140,22 @@ NIF(c_sign)
 NIF(c_sign_open)
 {
         R_BIN2(sm, pk);
-        W_BIN(m, m_term, sm.size - crypto_sign_BYTES);
+        W_BIN(m, m_term, sm.size);
+        // Signed messages have the signature as a prefix. The open
+        // function uses the output as a scratch buffer up to the size
+        // of the input, but outputs only the message with the prefix
+        // stripped.
+        //
+        // I'm guessing this is an API design choice to encourage clear
+        // distinction of signed vs unsigned data, and single-location 
+        // checking? Or just a coincidence.
+        //
+        // Either way, C returns crypto_sign_BYTES worth of junk at the
+        // end of the retval. Strip in Erlang.
         unsigned long long m_size;
         if (crypto_sign_open(m, &m_size, sm.data, sm.size, pk.data) == 0) {
                 if (m_size != (sm.size - crypto_sign_BYTES)) {
-                        return enif_make_badarg(env); // unreachable
+                        return enif_make_badarg(env); /* unreachable */
                 }
                 return m_term;
         }
